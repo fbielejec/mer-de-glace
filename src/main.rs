@@ -2,6 +2,8 @@ use chrono::{Utc};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use log::{debug, info, warn, error};
+use rusoto_core::Region;
+use rusoto_glacier::{Glacier, GlacierClient, ListVaultsInput, DescribeVaultInput, CreateVaultInput};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
@@ -9,7 +11,9 @@ use std::fs::{File, create_dir_all};
 use std::io::prelude::*;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::Duration ;
+use std::str::FromStr;
+use std::time::Duration;
+use tokio::{time::delay_for, fs::File as TokioFile, io};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -19,10 +23,14 @@ struct Config {
     mysql_database: String,
     mysql_user: String,
     mysql_password: String,
-    backups_directory: String
+    backups_directory: String,
+    aws_region: String,
+    aws_glacier_vault_name: String,
 }
 
-fn main() -> Result<(), anyhow::Error> {
+// TODO : refactor to use (async) functions
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
 
     let config = Config {
         wordpress_directory: get_env_var ("WORDPRESS_DIRECTORY", None)?,
@@ -32,6 +40,8 @@ fn main() -> Result<(), anyhow::Error> {
         mysql_user: get_env_var ("MYSQL_USER", None)?,
         mysql_password: get_env_var ("MYSQL_PASSWORD", None)?,
         backups_directory: get_env_var ("BACKUPS_DIRECTORY", Some (String::from ("backups")))?,
+        aws_region: get_env_var ("AWS_REGION", Some (String::from ("us-east-2")))?,
+        aws_glacier_vault_name: String::from ("testz") //get_env_var ("AWS_GLACIER_VAULT", None)?
     };
 
     env::set_var("RUST_LOG", get_env_var ("VERBOSITY", Some (String::from ("info")))?);
@@ -77,24 +87,65 @@ fn main() -> Result<(), anyhow::Error> {
         Ok(_) => info!("Successfully wrote to {}", sql_dump_path),
     };
 
-    // gzip the directory
+    // create gzip archive
     let backup_archive_path = format!("{}/wordpress_backup_{}.tar.gz", &config.backups_directory, &date);
     let tar_gz = File::create(backup_archive_path)?;
     let encoder = GzEncoder::new(tar_gz, Compression::default());
     let mut tar = tar::Builder::new(encoder);
 
-    tar.append_dir_all("wordpress-html", &config.wordpress_directory)?;
+    // add wordpress_directory to the archive
+    // TODO
+    // tar.append_dir_all(format!("wordpress-html_{}", &date), &config.wordpress_directory)?;
 
-    // add the dump to directory
+    // add the sql dump to the archive
     let mut file = File::open(&sql_dump_path)?;
     tar.append_file(&sql_dump_name, &mut file)?;
 
     tar.finish ()?;
 
-    // tar.append_dir_all("mysql", &config.wordpress_directory)?;
+    // TODO : cleanup
 
-    // info!("{:?}", &sql_dump);
-    // print_type_of (&sql_dump.get (0).unwrap ());
+    // TODO : send to glacier
+
+    // TODO create vault if not exists
+
+    // let r : Region = ;
+    let glacier_client = GlacierClient::new(Region::from_str (&config.aws_region)?);
+
+    let request = DescribeVaultInput {
+        account_id: "-".to_string(),
+        vault_name: String::from (&config.aws_glacier_vault_name),
+    };
+
+    match glacier_client.describe_vault (request).await {
+        Ok (result) => {
+            info! ("Vault exists: {:#?}", result);
+        },
+        Err (err) => {
+            warn! ("Vault {} not found: {:#?}", &config.aws_glacier_vault_name, err);
+            let request = CreateVaultInput {
+                account_id: "-".to_string(),
+                vault_name: String::from (&config.aws_glacier_vault_name),
+            };
+            match glacier_client.create_vault (request).await {
+                Ok (result) => {
+                    info! ("Created vault: {:#?}", result);
+                },
+                Err (err) => {
+                    panic! ("Could not create vault {}", err);
+                }
+            };
+
+        }
+    };
+
+
+    // aws glacier create-vault --vault-name awsexamplevault --account-id 111122223333
+
+
+
+    // info!("{:?}", &result);
+    // print_type_of (&result);
 
     info!("Done");
     Ok (())
