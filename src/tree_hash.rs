@@ -1,16 +1,12 @@
-extern crate crypto;
-
-use std::io;
+use sha2::{Sha256, Digest};
 use std::fs::File;
 use std::io::Read;
-use std::error::Error;
-
-use self::crypto::sha2::Sha256;
-use self::crypto::digest::Digest;
+use std::io;
 
 /****************************************************************
  * Constants and Types
  ****************************************************************/
+
 const ONE_MB: usize = 1048576;
 
 struct TreeHashStackFrame {
@@ -21,30 +17,28 @@ struct TreeHashStackFrame {
 /****************************************************************
  * Helper functions
  ****************************************************************/
+
 pub fn run_sha256(bytes: &[u8]) -> Vec<u8> {
-    let mut digest = Sha256::new();
-    let mut outbuf: [u8; 32] = [0; 32];
-
-    digest.input(bytes);
-    digest.result(&mut outbuf);
-
-    outbuf.iter().map(|b| *b).collect()
+    let mut sha256 = Sha256::new();
+    sha256.update(&bytes);
+    let result = sha256.finalize();
+    result.iter().map(|b| *b).collect()
 }
 
 pub fn to_hex_string(bytes: &Vec<u8>) -> String {
     let hex_str = String::with_capacity(64);
-
-    let bytestring = bytes.iter()
+    bytes.iter()
         .map(|b| format!("{:02x}", b))
-        .fold(hex_str, |mut str_agg, item| { str_agg.push_str(&item); str_agg });
-
-    // println!("{}", bytestring);
-        bytestring
+        .fold(hex_str, |mut str_agg, item| {
+            str_agg.push_str(&item);
+            str_agg
+        })
 }
 
 /****************************************************************
  * Main Implementation
  ****************************************************************/
+
 fn rollup(lbytes: &Vec<u8>, rbytes: &Vec<u8>) -> Vec<u8> {
     let mut merge_buf: [u8; 64] = [0; 64];
 
@@ -83,8 +77,7 @@ fn collapse_stack(stack: &mut Vec<TreeHashStackFrame>, force: bool) {
                 level: left.level + 1,
                 bytes: rolled_up
             });
-        }
-        else {
+        } else {
             stack.push(left);
             stack.push(right);
             return;
@@ -92,16 +85,21 @@ fn collapse_stack(stack: &mut Vec<TreeHashStackFrame>, force: bool) {
     }
 }
 
-pub fn tree_hash(filename: &str) -> Result<Vec<u8>, Box<Error>> {
+pub fn tree_hash(
+    // file : &mut File
+    filename: &str
+) -> Result<Vec<u8>, anyhow::Error> {
+
     // 32 should handle pretty large (several gb) files without reallocating
     let mut stack: Vec<TreeHashStackFrame> = Vec::with_capacity(32);
     let mut buf: [u8; ONE_MB] = [0; ONE_MB];
-    let mut read_from: Box<io::Read> = match filename {
-        "-" | "" => Box::new(io::stdin()),
-        _ => Box::new(File::open(filename)?)
-    };
+    let mut read_from: Box<dyn io::Read> = Box::new(
+        // file
+        File::open(filename)?
+    );
 
     loop {
+
         let bytes_read = read_from.read(&mut buf).unwrap();
         if bytes_read == 0 {
             break;

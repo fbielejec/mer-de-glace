@@ -4,23 +4,15 @@ use bytes::Bytes;
 use chrono::{Utc};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use log::{debug, info, warn, error};
+use log::{info, warn};
 use rusoto_core::Region;
-use rusoto_glacier::{Glacier, GlacierClient, ListVaultsInput, DescribeVaultInput, CreateVaultInput, UploadArchiveInput};
-use sha2::{Sha256, Sha512, Digest};
-use std::collections::HashMap;
+use rusoto_glacier::{Glacier, GlacierClient, DescribeVaultInput, CreateVaultInput, UploadArchiveInput, ArchiveCreationOutput};
 use std::env;
 use std::fs::{File, create_dir_all};
-use std::io::prelude::*;
-use std::io::{BufReader, Read, Write};
-use std::io;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::str::FromStr;
-use std::str;
-use std::time::Duration;
-use checksums::hash_file;
-use std::{thread, time};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -35,9 +27,15 @@ struct Config {
     aws_glacier_vault_name: String,
 }
 
+type AnyResult<T> = Result<T, anyhow::Error>;
+
+
 // TODO : refactor to use (async) functions
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> AnyResult<()> {
+
+    let today = Utc::now ();
+    let date = today.format("%Y-%m-%d");
 
     let config = Config {
         wordpress_directory: get_env_var ("WORDPRESS_DIRECTORY", None)?,
@@ -48,7 +46,7 @@ async fn main() -> Result<(), anyhow::Error> {
         mysql_password: get_env_var ("MYSQL_PASSWORD", None)?,
         backups_directory: get_env_var ("BACKUPS_DIRECTORY", Some (String::from ("backups")))?,
         aws_region: get_env_var ("AWS_REGION", Some (String::from ("us-east-2")))?,
-        aws_glacier_vault_name: String::from ("testz") //get_env_var ("AWS_GLACIER_VAULT", None)?
+        aws_glacier_vault_name: get_env_var ("AWS_GLACIER_VAULT", None)?
     };
 
     env::set_var("RUST_LOG", get_env_var ("VERBOSITY", Some (String::from ("info")))?);
@@ -56,80 +54,107 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("Running with {:#?}", &config);
 
-    let output : Output = Command::new("mysqldump")
-        .arg("-h")
-        .arg(&config.mysql_host)
-        .arg("--port")
-        .arg(&config.mysql_port)
-        .arg("-u")
-        .arg(&config.mysql_user)
-        .arg(format!("-p{}", &config.mysql_password))
-        .arg("--databases")
-        .arg(&config.mysql_database)
-        .output()
-        .expect("Failed to execute mysqldump");
-    let sql_dump = output.stdout;
-
     create_dir_all (&config.backups_directory).expect (&format! ("Couldn't create directory: {}", &config.backups_directory));
 
-    let today = Utc::now ();
-    let date = today.format("%Y-%m-%d");
-
     let sql_dump_name = format!("dump_{}.sql", &date);
-    let sql_dump_path = format!("{}/{}.sql", &config.backups_directory, &sql_dump_name);
-    // let path = Path::new(&p);
-    // let display = path.display();
+    let sql_dump_path = format!("{}/{}", &config.backups_directory, &sql_dump_name);
 
-    // Open a file in write-only mode
-    let mut file = match File::create(Path::new(&sql_dump_path)) {
-        Err(why) => panic!("Couldn't create {:#?}: {}", sql_dump_path, why),
-        Ok(file) => {
-            info!("Created backup file {}", &sql_dump_path);
-            file
-        },
-    };
-
-    match file.write_all(&sql_dump) {
-        Err(why) => panic!("Couldn't write to {}: {}", sql_dump_path, why),
-        Ok(_) => info!("Successfully wrote to archive {}", sql_dump_path),
-    };
+    // create sql dump
+    let sql_dump = dump_sql (&config);
+    write_to_file (&sql_dump, &sql_dump_path)?;
 
     // create gzip archive
-    let backup_archive_path = format!("{}/wordpress_backup_{}.tar.gz", &config.backups_directory, &date);
-    let tar_gz = File::create(&backup_archive_path)?;
-    let encoder = GzEncoder::new(tar_gz, Compression::default());
-    let mut tar = tar::Builder::new(encoder);
+    let archive_path = format!("{}/wordpress_backup_{}.tar.gz", &config.backups_directory, &date);
+    let mut tar = create_archive (&archive_path)?;
 
     // add wordpress_directory to the archive
-    // TODO
     tar.append_dir_all(format!("wordpress-html_{}", &date), &config.wordpress_directory)?;
 
     // add the sql dump to the archive
     let mut file = File::open(&sql_dump_path)?;
     tar.append_file(&sql_dump_name, &mut file)?;
 
+    // close the archive
     tar.finish ()?;
-
-    // TODO : cleanup
 
     let glacier_client = GlacierClient::new(Region::from_str (&config.aws_region)?);
 
-    let request = DescribeVaultInput {
-        account_id: "-".to_string(),
-        vault_name: String::from (&config.aws_glacier_vault_name),
+    ensure_vault (&glacier_client, &config.aws_glacier_vault_name).await?;
+
+    // send archive to glacier
+    // let mut archive : File = File::open(&archive_path)?;
+
+    let result = send_to_glacier (//archive,
+                                  &archive_path,
+                                  format!("Created: {}", &date),
+                                  &glacier_client,
+                                  &config.aws_glacier_vault_name).await?;
+
+    info!("Archive succesfully stored in glacier: {} with id: {}", &result.location.unwrap_or (String::from ("unknown")), &result.archive_id.unwrap_or (String::from ("unknown")));
+
+    // TODO : cleanup
+    // sql dump file
+    // archives older than x amount of time
+
+    info!("Done");
+    Ok (())
+}
+
+// TODO : return id
+async fn send_to_glacier (file_path : &str, description : String, client : &GlacierClient, vault_name : &str) -> AnyResult<ArchiveCreationOutput> {
+
+    let hash : String = match tree_hash::tree_hash(file_path) {
+        Ok(hash_bytes) => {
+            tree_hash::to_hex_string(&hash_bytes)
+        },
+        Err(_) => panic!("Error calculating tree hash")
     };
 
-    match glacier_client.describe_vault (request).await {
+    info!("content hash: {}", &hash);
+
+    let mut file : File = File::open(&file_path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    let bytes : Bytes = Bytes::from (buffer);
+
+    // info!("here @1 {:#?}", bytes);
+
+    let request = UploadArchiveInput {
+        account_id: "-".to_string(),
+        archive_description: Some (description),
+        body: Some (bytes),
+        checksum: Some (hash),
+        vault_name: String::from (vault_name),
+        ..Default::default()
+    };
+
+    // info!("here @2");
+
+    let result = client.upload_archive (request).await?;
+
+    // info!("here @3");
+
+    Ok (result)
+}
+
+async fn ensure_vault (client : &GlacierClient, vault_name : &str) -> AnyResult<()> {
+
+    let request = DescribeVaultInput {
+        account_id: "-".to_string(),
+        vault_name: String::from (vault_name),
+    };
+
+    match client.describe_vault (request).await {
         Ok (result) => {
             info! ("Vault exists: {:#?}", result);
         },
         Err (err) => {
-            warn! ("Vault {} not found: {:#?}", &config.aws_glacier_vault_name, err);
+            warn! ("Vault {} not found: {:#?}", vault_name, err);
             let request = CreateVaultInput {
                 account_id: "-".to_string(),
-                vault_name: String::from (&config.aws_glacier_vault_name),
+                vault_name: String::from (vault_name),
             };
-            match glacier_client.create_vault (request).await {
+            match client.create_vault (request).await {
                 Ok (result) => {
                     info! ("Created vault: {:#?}", result);
                 },
@@ -140,52 +165,54 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     };
 
-    // send archive to glacier
-
-    let hash : String = match tree_hash::tree_hash(&backup_archive_path) {
-        Ok(hash_bytes) => {
-            tree_hash::to_hex_string(&hash_bytes)
-        },
-        Err(_) => panic!("Error calculating tree hash")
-    };
-
-
-    // read the whole file
-    let mut archive : File = File::open(&backup_archive_path)?;
-    let mut buffer = Vec::new();
-    archive.read_to_end(&mut buffer)?;
-    let mut bytes : Bytes = Bytes::from (buffer);
-
-    // // create a Sha256 string
-    // let mut sha256 = Sha256::new();
-    // sha256.update(&bytes);
-    // let result = sha256.finalize();
-    // let hash: String = format!("{:X}", result);
-
-    // info!("Archive hash {}", &hash);
-
-    // let res = hash_file(Path::new (&backup_archive_path), checksums::Algorithm::SHA2256);
-    // info!("Archive hash {}", &res);
-
-    let request = UploadArchiveInput {
-        account_id: "-".to_string(),
-        archive_description: Some (format!("Created: {}", date)),
-        body: Some (bytes),
-        checksum: Some (hash),
-        vault_name: config.aws_glacier_vault_name,
-        ..Default::default()
-    };
-
-    let result = glacier_client.upload_archive (request).await?;
-
-    info!("{:#?}", &result);
-    // print_type_of (&buffer);
-
-    info!("Done");
     Ok (())
 }
 
-fn get_env_var (var : &str, default: Option<String> ) -> Result<String, anyhow::Error> {
+fn create_archive (path : &str)
+                   -> AnyResult<tar::Builder<flate2::write::GzEncoder<std::fs::File>>> {
+    let tar_gz = File::create(path)?;
+    let encoder = GzEncoder::new(tar_gz, Compression::default());
+    Ok (tar::Builder::new(encoder))
+}
+
+// TODO : spawn as thread
+fn dump_sql (config: &Config) -> Vec<u8> {
+
+    let Config { mysql_host, mysql_port, mysql_user, mysql_password, mysql_database, .. } = config;
+
+    let output : Output = Command::new("mysqldump")
+        .arg("-h")
+        .arg(&mysql_host)
+        .arg("--port")
+        .arg(&mysql_port)
+        .arg("-u")
+        .arg(&mysql_user)
+        .arg(format!("-p{}", &mysql_password))
+        .arg("--databases")
+        .arg(&mysql_database)
+        .output()
+        .expect("Failed to execute mysqldump");
+
+    info!("Succesfully dumped SQL data");
+
+    output.stdout
+}
+
+fn write_to_file (content: &Vec<u8>, path : &str) -> AnyResult<()> {
+    match File::create(Path::new(&path)) {
+        Err(why) => panic!("Couldn't create {:#?}: {}", path, why),
+        Ok(mut file) => {
+            match file.write_all(content) {
+                Err(why) => panic!("Couldn't write to {}: {}", path, why),
+                Ok(_) => info!("Successfully wrote to file {}", path),
+            };
+        }
+    };
+
+    Ok (())
+}
+
+fn get_env_var (var : &str, default: Option<String> ) -> AnyResult<String> {
     match env::var(var) {
         Ok (v) => Ok (v),
         Err (_) => {
