@@ -1,4 +1,5 @@
-// use checksums::hash_file;
+mod tree_hash;
+
 use bytes::Bytes;
 use chrono::{Utc};
 use flate2::Compression;
@@ -18,8 +19,8 @@ use std::process::{Command, Output};
 use std::str::FromStr;
 use std::str;
 use std::time::Duration;
-
-// use tokio::{io};
+use checksums::hash_file;
+use std::{thread, time};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -101,7 +102,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // add wordpress_directory to the archive
     // TODO
-    // tar.append_dir_all(format!("wordpress-html_{}", &date), &config.wordpress_directory)?;
+    tar.append_dir_all(format!("wordpress-html_{}", &date), &config.wordpress_directory)?;
 
     // add the sql dump to the archive
     let mut file = File::open(&sql_dump_path)?;
@@ -139,24 +140,32 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     };
 
-    // TODO : send archive to glacier
+    // send archive to glacier
+
+    let hash : String = match tree_hash::tree_hash(&backup_archive_path) {
+        Ok(hash_bytes) => {
+            tree_hash::to_hex_string(&hash_bytes)
+        },
+        Err(_) => panic!("Error calculating tree hash")
+    };
+
 
     // read the whole file
     let mut archive : File = File::open(&backup_archive_path)?;
     let mut buffer = Vec::new();
     archive.read_to_end(&mut buffer)?;
-
     let mut bytes : Bytes = Bytes::from (buffer);
 
-    // create a Sha256 string
-    let mut sha256 = Sha256::new();
-    sha256.update(&bytes);
-    let result = sha256.finalize();
-    let hash: String = format!("{:X}", result);
+    // // create a Sha256 string
+    // let mut sha256 = Sha256::new();
+    // sha256.update(&bytes);
+    // let result = sha256.finalize();
+    // let hash: String = format!("{:X}", result);
 
-    info!("Archive hash {}", &hash);
+    // info!("Archive hash {}", &hash);
 
-    // let sparkle_heart = hash_file (Path::new (&backup_archive_path), checksums::Algorithm::SHA2256);
+    // let res = hash_file(Path::new (&backup_archive_path), checksums::Algorithm::SHA2256);
+    // info!("Archive hash {}", &res);
 
     let request = UploadArchiveInput {
         account_id: "-".to_string(),
@@ -167,11 +176,9 @@ async fn main() -> Result<(), anyhow::Error> {
         ..Default::default()
     };
 
-    // let result = glacier_client.upload_archive (request).await?;
+    let result = glacier_client.upload_archive (request).await?;
 
-    // info!("{:#?}", &result);
-    // info!("{:?}", sparkle_heart);
-    // info!("{:?}", buffer);
+    info!("{:#?}", &result);
     // print_type_of (&buffer);
 
     info!("Done");
@@ -189,21 +196,6 @@ fn get_env_var (var : &str, default: Option<String> ) -> Result<String, anyhow::
         }
     }
 }
-
-// fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
-//     let mut context = Context::new(&SHA256);
-//     let mut buffer = [0; 1024];
-
-//     loop {
-//         let count = reader.read(&mut buffer)?;
-//         if count == 0 {
-//             break;
-//         }
-//         context.update(&buffer[..count]);
-//     }
-
-//     Ok(context.finish())
-// }
 
 pub fn print_type_of<T>(_: &T) {
     println!("{}", std::any::type_name::<T>())

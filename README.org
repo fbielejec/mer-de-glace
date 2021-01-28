@@ -25,6 +25,8 @@ export MYSQL_PASSWORD=Pa55w0rd
 export BACKUPS_DIRECTORY=/home/$USER/wp_backups
 export AWS_REGION=us-east-2
 export AWS_GLACIER_VAULT=test
+export AWS_ACCESS_KEY_ID=<...>
+export AWS_SECRET_ACCESS_KEY=<...>
 ```
 
 ```bash
