@@ -1,0 +1,15 @@
+[package]
+name = "mer-de-glace"
+version = "0.1.0"
+authors = ["filip <fbielejec@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+anyhow = "^1.0"
+chrono = "0.4"
+env_logger = "^0.8"
+flate2 = "1.0.19"
+log = "^0.4"
+tar = "0.4"
+# async-std = {version = "1.8.0", features = ["unstable", "attributes"]}
+# ron = "0.6.3"

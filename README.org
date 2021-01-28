@@ -1,0 +1,30 @@
+#+TITLE:       mer-de-glace
+#+SUBTITLE:    wordpress backup tool
+#+AUTHOR:      Filip Bielejec
+#+EMAIL:       (concat "fbielejec" at-sign "gmail.com")
+#+DESCRIPTION: tool written in Rust to create backups of wordpress.org installations
+#+KEYWORDS:    rust, docker, wordpress, mySQL, mariadb, wordpress.org
+#+LANGUAGE:    en
+#+OPTIONS:     H:4 num:nil toc:2 p:t
+
+#+HTML_LINK_HOME: https://www.blog.nodrama.io/
+
+* Summary
+Mer-de-glace is a tool for creating periodic backups of wordpress.org installations.
+
+* Development
+
+```bash
+# path to /var/www/html directory of the wordpress installations
+export WORDPRESS_DIRECTORY=/home/$USER/wordpress-docker
+export MYSQL_HOST="127.0.0.1"
+export MYSQL_PORT=3306
+export MYSQL_DATABASE=wordpress
+export MYSQL_USER=root
+export MYSQL_PASSWORD=Pa55w0rd
+export BACKUPS_DIRECTORY=/home/$USER/wp_backups
+```
+
+```bash
+cargo watch -x run
+```
