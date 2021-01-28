@@ -1,19 +1,25 @@
+// use checksums::hash_file;
+use bytes::Bytes;
 use chrono::{Utc};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use log::{debug, info, warn, error};
 use rusoto_core::Region;
-use rusoto_glacier::{Glacier, GlacierClient, ListVaultsInput, DescribeVaultInput, CreateVaultInput};
+use rusoto_glacier::{Glacier, GlacierClient, ListVaultsInput, DescribeVaultInput, CreateVaultInput, UploadArchiveInput};
+use sha2::{Sha256, Sha512, Digest};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::env;
 use std::fs::{File, create_dir_all};
 use std::io::prelude::*;
+use std::io::{BufReader, Read, Write};
+use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::str::FromStr;
+use std::str;
 use std::time::Duration;
-use tokio::{time::delay_for, fs::File as TokioFile, io};
+
+// use tokio::{io};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -84,12 +90,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     match file.write_all(&sql_dump) {
         Err(why) => panic!("Couldn't write to {}: {}", sql_dump_path, why),
-        Ok(_) => info!("Successfully wrote to {}", sql_dump_path),
+        Ok(_) => info!("Successfully wrote to archive {}", sql_dump_path),
     };
 
     // create gzip archive
     let backup_archive_path = format!("{}/wordpress_backup_{}.tar.gz", &config.backups_directory, &date);
-    let tar_gz = File::create(backup_archive_path)?;
+    let tar_gz = File::create(&backup_archive_path)?;
     let encoder = GzEncoder::new(tar_gz, Compression::default());
     let mut tar = tar::Builder::new(encoder);
 
@@ -105,11 +111,6 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // TODO : cleanup
 
-    // TODO : send to glacier
-
-    // TODO create vault if not exists
-
-    // let r : Region = ;
     let glacier_client = GlacierClient::new(Region::from_str (&config.aws_region)?);
 
     let request = DescribeVaultInput {
@@ -135,17 +136,43 @@ async fn main() -> Result<(), anyhow::Error> {
                     panic! ("Could not create vault {}", err);
                 }
             };
-
         }
     };
 
+    // TODO : send archive to glacier
 
-    // aws glacier create-vault --vault-name awsexamplevault --account-id 111122223333
+    // read the whole file
+    let mut archive : File = File::open(&backup_archive_path)?;
+    let mut buffer = Vec::new();
+    archive.read_to_end(&mut buffer)?;
 
+    let mut bytes : Bytes = Bytes::from (buffer);
 
+    // create a Sha256 string
+    let mut sha256 = Sha256::new();
+    sha256.update(&bytes);
+    let result = sha256.finalize();
+    let hash: String = format!("{:X}", result);
 
-    // info!("{:?}", &result);
-    // print_type_of (&result);
+    info!("Archive hash {}", &hash);
+
+    // let sparkle_heart = hash_file (Path::new (&backup_archive_path), checksums::Algorithm::SHA2256);
+
+    let request = UploadArchiveInput {
+        account_id: "-".to_string(),
+        archive_description: Some (format!("Created: {}", date)),
+        body: Some (bytes),
+        checksum: Some (hash),
+        vault_name: config.aws_glacier_vault_name,
+        ..Default::default()
+    };
+
+    // let result = glacier_client.upload_archive (request).await?;
+
+    // info!("{:#?}", &result);
+    // info!("{:?}", sparkle_heart);
+    // info!("{:?}", buffer);
+    // print_type_of (&buffer);
 
     info!("Done");
     Ok (())
@@ -162,6 +189,21 @@ fn get_env_var (var : &str, default: Option<String> ) -> Result<String, anyhow::
         }
     }
 }
+
+// fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
+//     let mut context = Context::new(&SHA256);
+//     let mut buffer = [0; 1024];
+
+//     loop {
+//         let count = reader.read(&mut buffer)?;
+//         if count == 0 {
+//             break;
+//         }
+//         context.update(&buffer[..count]);
+//     }
+
+//     Ok(context.finish())
+// }
 
 pub fn print_type_of<T>(_: &T) {
     println!("{}", std::any::type_name::<T>())
