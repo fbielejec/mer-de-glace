@@ -1,3 +1,6 @@
+// https://docs.aws.amazon.com/amazonglacier/latest/dev/checksum-calculations.html#checksum-calculations-upload-archive-in-single-payload
+// Adapted from : https://github.com/joechrz/treehash
+
 use sha2::{Sha256, Digest};
 use std::fs::File;
 use std::io::Read;
@@ -22,10 +25,11 @@ pub fn run_sha256(bytes: &[u8]) -> Vec<u8> {
     let mut sha256 = Sha256::new();
     sha256.update(&bytes);
     let result = sha256.finalize();
-    result.iter().map(|b| *b).collect()
+
+    result.iter().copied().collect()
 }
 
-pub fn to_hex_string(bytes: &Vec<u8>) -> String {
+pub fn to_hex_string(bytes: &[u8]) -> String {
     let hex_str = String::with_capacity(64);
     bytes.iter()
         .map(|b| format!("{:02x}", b))
@@ -39,13 +43,12 @@ pub fn to_hex_string(bytes: &Vec<u8>) -> String {
  * Main Implementation
  ****************************************************************/
 
-fn rollup(lbytes: &Vec<u8>, rbytes: &Vec<u8>) -> Vec<u8> {
+fn rollup(lbytes: &[u8], rbytes: &[u8]) -> Vec<u8> {
+
     let mut merge_buf: [u8; 64] = [0; 64];
 
-    for i in 0..32 {
-        merge_buf[i] = lbytes[i];
-        merge_buf[32 + i] = rbytes[i];
-    }
+    merge_buf[..32].clone_from_slice(&lbytes[..32]);
+    merge_buf[32..(32 + 32)].clone_from_slice(&rbytes[..32]);
 
     run_sha256(&merge_buf)
 }

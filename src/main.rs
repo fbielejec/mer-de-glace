@@ -1,21 +1,35 @@
 mod tree_hash;
 
 use bytes::Bytes;
-use chrono::{Utc};
+use chrono::{Utc, DateTime};
+use std::time::Duration as Duration;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use log::{info, warn};
+use regex::Regex;
 use rusoto_core::Region;
 use rusoto_glacier::{Glacier, GlacierClient, DescribeVaultInput, CreateVaultInput, UploadArchiveInput, ArchiveCreationOutput};
 use std::env;
 use std::fs::{File, create_dir_all};
+use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::str::FromStr;
+use tokio::time;
+
+#[macro_use] extern crate lazy_static;
+
+const ARCHIVE_ROOT: &str = "wordpress_backup";
+
+lazy_static! {
+    static ref RE: Regex = Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap();
+}
 
 #[derive(Debug, Clone)]
 struct Config {
+    interval: u32,
+    archive_rolling_period: u32,
     wordpress_directory: String,
     mysql_host: String,
     mysql_port: String,
@@ -29,21 +43,18 @@ struct Config {
 
 type AnyResult<T> = Result<T, anyhow::Error>;
 
-
-// TODO : refactor to use (async) functions
 #[tokio::main]
 async fn main() -> AnyResult<()> {
-
-    let today = Utc::now ();
-    let date = today.format("%Y-%m-%d");
 
     let config = Config {
         wordpress_directory: get_env_var ("WORDPRESS_DIRECTORY", None)?,
         mysql_host: get_env_var ("MYSQL_HOST", None)?,
-        mysql_port: get_env_var ("MYSQL_PORT", None)?,
+        mysql_port: get_env_var ("MYSQL_PORT", Some (String::from ("3306")))?,
         mysql_database: get_env_var ("MYSQL_DATABASE", None)?,
         mysql_user: get_env_var ("MYSQL_USER", None)?,
         mysql_password: get_env_var ("MYSQL_PASSWORD", None)?,
+        interval: get_env_var ("BACKUP_INTERVAL", Some (String::from ("7")))?.parse::<u32>()?,
+        archive_rolling_period: get_env_var ("ARCHIVE_ROLLING_PERIOD", Some (String::from ("14")))?.parse::<u32>()?,
         backups_directory: get_env_var ("BACKUPS_DIRECTORY", Some (String::from ("backups")))?,
         aws_region: get_env_var ("AWS_REGION", Some (String::from ("us-east-2")))?,
         aws_glacier_vault_name: get_env_var ("AWS_GLACIER_VAULT", None)?
@@ -54,17 +65,33 @@ async fn main() -> AnyResult<()> {
 
     info!("Running with {:#?}", &config);
 
-    create_dir_all (&config.backups_directory).expect (&format! ("Couldn't create directory: {}", &config.backups_directory));
+    // ensure directory for backups
+    create_dir_all (&config.backups_directory).unwrap_or_else(|_| panic!("Couldn't create directory: {}", &config.backups_directory));
+
+    let mut interval = time::interval(Duration::from_secs(
+        86400 * config.interval as u64
+    ));
+    loop {
+        interval.tick().await;
+        create_backup (&config).await?;
+    }
+
+}
+
+async fn create_backup (config: &Config) -> AnyResult<()> {
+
+    let today = Utc::now ();
+    let date = today.format("%Y-%m-%d");
 
     let sql_dump_name = format!("dump_{}.sql", &date);
     let sql_dump_path = format!("{}/{}", &config.backups_directory, &sql_dump_name);
 
     // create sql dump
     let sql_dump = dump_sql (&config);
-    write_to_file (&sql_dump, &sql_dump_path)?;
+    write_to_file (&sql_dump, &sql_dump_path);
 
     // create gzip archive
-    let archive_path = format!("{}/wordpress_backup_{}.tar.gz", &config.backups_directory, &date);
+    let archive_path = format!("{}/{}_{}.tar.gz", &config.backups_directory, ARCHIVE_ROOT, &date);
     let mut tar = create_archive (&archive_path)?;
 
     // add wordpress_directory to the archive
@@ -81,27 +108,54 @@ async fn main() -> AnyResult<()> {
 
     ensure_vault (&glacier_client, &config.aws_glacier_vault_name).await?;
 
-    // send archive to glacier
-    // let mut archive : File = File::open(&archive_path)?;
-
-    let result = send_to_glacier (//archive,
-                                  &archive_path,
+    let result = send_to_glacier (&archive_path,
                                   format!("Created: {}", &date),
                                   &glacier_client,
                                   &config.aws_glacier_vault_name).await?;
 
-    info!("Archive succesfully stored in glacier: {} with id: {}", &result.location.unwrap_or (String::from ("unknown")), &result.archive_id.unwrap_or (String::from ("unknown")));
+    info!("Archive succesfully stored in glacier with id: {}",
+          &result.archive_id.unwrap_or_else(|| String::from ("unknown")));
 
-    // TODO : cleanup
-    // sql dump file
-    // archives older than x amount of time
+    cleanup (&sql_dump_path, &config.backups_directory, &today, config.archive_rolling_period)?;
 
     info!("Done");
+
     Ok (())
 }
 
-// TODO : return id
-async fn send_to_glacier (file_path : &str, description : String, client : &GlacierClient, vault_name : &str) -> AnyResult<ArchiveCreationOutput> {
+fn cleanup (sql_dump_path: &str,
+            backups_directory: &str,
+            today: &DateTime<Utc>,
+            rolling_period : u32)
+            -> AnyResult<()> {
+
+    fs::remove_file(sql_dump_path).unwrap_or_else (| why | { warn!("Could not remove {} {}", &sql_dump_path, why) });
+
+    for entry in fs::read_dir(backups_directory)? {
+        let path_buf = entry?.path ();
+        let archive_name = path_buf.as_path ().display ().to_string ();
+        let d = &RE.captures_iter(&archive_name).next ().unwrap () [0];
+        let d = &format!("{} 00:00:00 +00:00", d);
+        let archive_date = d.parse::<DateTime<Utc>>()?;
+
+        let diff = (*today - archive_date).num_days ();
+        if diff as u32 >= rolling_period {
+            info! ("Archive {} is older than {} old, removing", archive_name, rolling_period);
+            fs::remove_file(&archive_name).unwrap_or_else (| why | { warn!("Could not remove {} {}", &archive_name, why) });
+        } else {
+            info! ("Archive {} is {} days old", archive_name, diff);
+        }
+
+    }
+
+    Ok (())
+}
+
+async fn send_to_glacier (file_path : &str,
+                          description : String,
+                          client : &GlacierClient,
+                          vault_name : &str)
+                          -> AnyResult<ArchiveCreationOutput> {
 
     let hash : String = match tree_hash::tree_hash(file_path) {
         Ok(hash_bytes) => {
@@ -110,29 +164,25 @@ async fn send_to_glacier (file_path : &str, description : String, client : &Glac
         Err(_) => panic!("Error calculating tree hash")
     };
 
-    info!("content hash: {}", &hash);
+    info!("Archive content hash: {}", &hash);
 
     let mut file : File = File::open(&file_path)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
     let bytes : Bytes = Bytes::from (buffer);
 
-    // info!("here @1 {:#?}", bytes);
-
     let request = UploadArchiveInput {
         account_id: "-".to_string(),
         archive_description: Some (description),
         body: Some (bytes),
         checksum: Some (hash),
-        vault_name: String::from (vault_name),
-        ..Default::default()
+        vault_name: String::from (vault_name)
     };
 
-    // info!("here @2");
-
-    let result = client.upload_archive (request).await?;
-
-    // info!("here @3");
+    let result = match client.upload_archive (request).await {
+        Ok (res) => res,
+        Err (err) => panic!("Error when uploading {} to glacier: {}", file_path, err)
+    };
 
     Ok (result)
 }
@@ -146,20 +196,20 @@ async fn ensure_vault (client : &GlacierClient, vault_name : &str) -> AnyResult<
 
     match client.describe_vault (request).await {
         Ok (result) => {
-            info! ("Vault exists: {:#?}", result);
+            info! ("Glacier vault exists: {:#?}", result);
         },
         Err (err) => {
-            warn! ("Vault {} not found: {:#?}", vault_name, err);
+            warn! ("Glacier vault {} not found: {:#?}", vault_name, err);
             let request = CreateVaultInput {
                 account_id: "-".to_string(),
                 vault_name: String::from (vault_name),
             };
             match client.create_vault (request).await {
                 Ok (result) => {
-                    info! ("Created vault: {:#?}", result);
+                    info! ("Created glacier vault: {:#?}", result);
                 },
                 Err (err) => {
-                    panic! ("Could not create vault {}", err);
+                    panic! ("Could not create glacier vault {}", err);
                 }
             };
         }
@@ -198,7 +248,7 @@ fn dump_sql (config: &Config) -> Vec<u8> {
     output.stdout
 }
 
-fn write_to_file (content: &Vec<u8>, path : &str) -> AnyResult<()> {
+fn write_to_file (content: &[u8], path : &str) {
     match File::create(Path::new(&path)) {
         Err(why) => panic!("Couldn't create {:#?}: {}", path, why),
         Ok(mut file) => {
@@ -207,9 +257,7 @@ fn write_to_file (content: &Vec<u8>, path : &str) -> AnyResult<()> {
                 Ok(_) => info!("Successfully wrote to file {}", path),
             };
         }
-    };
-
-    Ok (())
+    }
 }
 
 fn get_env_var (var : &str, default: Option<String> ) -> AnyResult<String> {

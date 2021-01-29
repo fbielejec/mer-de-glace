@@ -17,10 +17,12 @@ Mer-de-glace is a tool for creating periodic backups of wordpress.org installati
 ```bash
 # path to /var/www/html directory of the wordpress installations
 export WORDPRESS_DIRECTORY=/home/$USER/wordpress-docker
+
 export MYSQL_HOST="127.0.0.1"
 export MYSQL_PORT=3306
 export MYSQL_DATABASE=wordpress
 export MYSQL_USER=root
+
 export MYSQL_PASSWORD=Pa55w0rd
 export BACKUPS_DIRECTORY=/home/$USER/wp_backups
 export AWS_REGION=us-east-2
