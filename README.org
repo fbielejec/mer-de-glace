@@ -9,7 +9,9 @@
 
 #+HTML_LINK_HOME: https://www.blog.nodrama.io/
 
-[[file:merglac3-thomas-muller.jpg][merglace-by-thomas-muller]]
+# [[file:images/merglac3-thomas-muller.jpg]]
+
+<p align="center"><img src="images/merglac3-thomas-muller.jpg" /></p>
 
 * Summary
 Mer-de-glace is a tool for creating rolling backups of [[https://wordpress.org/][wordpress.org]] installations.
