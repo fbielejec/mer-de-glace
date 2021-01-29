@@ -9,12 +9,10 @@
 
 #+HTML_LINK_HOME: https://www.blog.nodrama.io/
 
-# [[file:images/merglac3-thomas-muller.jpg]]
-
 #+html: <p align="center"><img src="images/merglac3-thomas-muller.jpg"/></p>
 
 * Summary
-Mer-de-glace is a tool for creating rolling backups of [[https://wordpress.org/][wordpress.org]] installations.
+[[https://github.com/fbielejec/mer-de-glace][Mer-de-glace]] is a tool for creating rolling backups of [[https://wordpress.org/][wordpress.org]] installations.
 
 It will periodically create a tar archives with the:
 - dump of mysql wordpress database
@@ -86,7 +84,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
       # optional
       - BACKUP_INTERVAL=7 # create new glacier archive every 7 days
-      - ARCHIVE_ROLLING_PERIOD=14 # keep local archives for that long
+      - ARCHIVE_ROLLING_PERIOD=14 # keep local (on-disk) archives for that long
     volumes:
       - /home/$USER/wordpress-docker:/wordpress-docker
       - /home/$USER/wp_backups:/wp_backups
