@@ -22,7 +22,7 @@ This tar archive will be than uploaded to the [[https://aws.amazon.com/glacier/]
 
 * Using
 
-Probably the most convenient is to use the tool /via/ a docker container. Below an example docker-compose config:
+The most convenient way to use the tool is /via/ a docker container. Below an example docker-compose config:
 
 #+BEGIN_SRC yaml
 version: "3.5"
@@ -73,11 +73,11 @@ services:
     environment:
       # required
       - WORDPRESS_DIRECTORY=/wordpress-docker
+      - BACKUPS_DIRECTORY=/wp_backups
       - MYSQL_HOST=mysql
       - MYSQL_DATABASE=wordpress
       - MYSQL_USER=root
       - MYSQL_PASSWORD=Pa55w0rd
-      - BACKUPS_DIRECTORY=/wp_backups
       - AWS_REGION=us-east-2
       - AWS_GLACIER_VAULT=wordpress_backups
       - AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
@@ -105,8 +105,8 @@ export MYSQL_PASSWORD=Pa55w0rd
 export BACKUPS_DIRECTORY=/home/$USER/wp_backups
 export AWS_REGION=us-east-2
 export AWS_GLACIER_VAULT=test
-export AWS_ACCESS_KEY_ID=<...>
-export AWS_SECRET_ACCESS_KEY=<...>
+export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
 #+END_SRC
 
 Start a watcher on the sources:
