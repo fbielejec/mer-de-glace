@@ -9,28 +9,108 @@
 
 #+HTML_LINK_HOME: https://www.blog.nodrama.io/
 
+[[file:merglac3-thomas-muller.jpg][merglace-by-thomas-muller]]
+
 * Summary
-Mer-de-glace is a tool for creating periodic backups of wordpress.org installations.
+Mer-de-glace is a tool for creating rolling backups of [[https://wordpress.org/][wordpress.org]] installations.
+
+It will periodically create a tar archives with the:
+- dump of mysql wordpress database
+- the wordpress html content
+
+This tar archive will be than uploaded to the [[https://aws.amazon.com/glacier/][AWS Glacier]].
+
+* Using
+
+Probably the most convenient is to use the tool /via/ a docker container. Below an example docker-compose config:
+
+#+BEGIN_SRC yaml
+version: "3.5"
+services:
+
+  mysql:
+    image: mysql:5.7
+    container_name: mysql
+    command:
+      --default-authentication-plugin=mysql_native_password
+    volumes:
+      - /home/$USER/mysql-docker:/var/lib/mysql
+    expose:
+      - 3306
+    ports:
+      - 0.0.0.0:3306:3306
+    environment:
+      - MYSQL_ROOT_USER=root
+      - MYSQL_ROOT_PASSWORD=Pa55w0rd
+      - MYSQL_DATABASE=wordpress
+      - MYSQL_USER=wordpress
+      - MYSQL_PASSWORD=wordpress
+    restart: always
+
+  wordpress:
+    image: wordpress:latest
+    container_name: wordpress
+    depends_on:
+      - mysql
+    expose:
+      - 80
+    ports:
+      - 0.0.0.0:8080:80
+    volumes:
+      - /home/$USER/wordpress-docker:/var/www/html
+    environment:
+      - WORDPRESS_DB_HOST=mysql:3306
+      - WORDPRESS_DB_USER=wordpress
+      - WORDPRESS_DB_PASSWORD=wordpress
+    restart: always
+
+  mer-de-glace:
+    image: fbielejec/mer-de-glace
+    container_name: mer-de-glace
+    depends_on:
+      - wordpress
+      - mysql
+    environment:
+      # required
+      - WORDPRESS_DIRECTORY=/wordpress-docker
+      - MYSQL_HOST=mysql
+      - MYSQL_DATABASE=wordpress
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=Pa55w0rd
+      - BACKUPS_DIRECTORY=/wp_backups
+      - AWS_REGION=us-east-2
+      - AWS_GLACIER_VAULT=wordpress_backups
+      - AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+      # optional
+      - BACKUP_INTERVAL=7 # create new glacier archive every 7 days
+      - ARCHIVE_ROLLING_PERIOD=14 # keep local archives for that long
+    volumes:
+      - /home/$USER/wordpress-docker:/wordpress-docker
+      - /home/$USER/wp_backups:/wp_backups
+#+END_SRC
 
 * Development
 
-```bash
+Export following ENV variables:
+
+#+BEGIN_SRC bash
 # path to /var/www/html directory of the wordpress installations
 export WORDPRESS_DIRECTORY=/home/$USER/wordpress-docker
-
 export MYSQL_HOST="127.0.0.1"
 export MYSQL_PORT=3306
 export MYSQL_DATABASE=wordpress
 export MYSQL_USER=root
-
 export MYSQL_PASSWORD=Pa55w0rd
 export BACKUPS_DIRECTORY=/home/$USER/wp_backups
 export AWS_REGION=us-east-2
 export AWS_GLACIER_VAULT=test
 export AWS_ACCESS_KEY_ID=<...>
 export AWS_SECRET_ACCESS_KEY=<...>
-```
+#+END_SRC
 
-```bash
+Start a watcher on the sources:
+
+#+BEGIN_SRC bash
 cargo watch -x run
-```
+#+END_SRC
